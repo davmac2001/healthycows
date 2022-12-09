@@ -1,0 +1,122 @@
+---
+title: "Healthy Cows milk production prediction - copy 9-12-2022"
+output: html_notebook
+---
+
+# Libraries
+```{r}
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(dplyr)
+library(chron)
+library(stringi)
+library(RCurl)
+```
+
+### Business understanding. Proefboerderij de Marke is an experimental dairy farm working for the WUR (University of Wageningen). De Marke is collecting a lot of data at this point from different sensors. The most important data the farm is gathering is concerning the grazing activity of the cows,  the ruminating activitiy and the milk production. Their goal is to combine all the data in 1 dashboard in order to use it as steering information. They want to be able to predict (or actually signal) that a cow is getting sick based on this data. 
+
+# In order to meet the end goal of making a dashboard, the project is cut in several smaller projects for multiple project groups consisting of students of the HAN University of Applied Sciences. One of the smaller projects is to ''predict'' if a cow will get sick, based on the data of the milking production which comes from a De GEA milking robot. This will be the scope of this script/ project. Since this type of prediction already exists at other companies (E.G.: Lely, DeLaval and even De GEA itself), a benchmark has been put in place. This was done so there would be a better understanding of the current challenge.
+
+# From the bechmark a lot of knowledge was gathered in which it has become clear how those companies "predict" if a cow is or gets sick based on milking production. The most important area codes these companies look at to do this, are: amount of produced milk (in KG), temperature of the milk, conductivity, color, fat/ protein ratio. It is also important in what way these area codes are interpreted, so this knowledge also was gathered from the benchmark.
+
+
+### Data Understanding. Because of the gained knowledge from the benchmark, it became clear what data was needed from de Marke. A project manager from the WUR was asked for this data, and he send us the data concerning all milk production from the de GEA robot of the month of September. 
+
+# In order to understand the gained data from the WUR, it first has to be imported. 
+```{r}
+url <- "https://raw.githubusercontent.com/DannyBannink/HealthyCows/main/export.csv"
+df <- read.csv(url)
+df
+```
+# There seems to be some kind of structure within the data, but it is not clear what all the area codes mean. Therefore the project manager of the WUR was contacted to track down the definitions of all these area codes. It is most important that the area codes for amount of milk production, conductivity, temperature and fat/ protein ratio is tracked down. 
+
+# The de GEA milk helpdesk eventually sended a list with the definitions of ALL AREA CODES used within the company. Therefore it was possible to track down the needed definitions of all the to be used area codes. When translating all the area codes in the dataset, only 8 usable area codes were left in order to predict the sickness of a cow based on the milking production. These 8 area codes are: Reg1, Name, RespISO, IMDat, IMTim, IMWt, IMDim and IMInterval. 
+
+# Because of the description above, all unusable area codes (columns) are dropped from the dataframe. Since all 0 and NA values are unusable, these rows have to be dropped from the dataset. 
+```{r}
+df1 <- subset(df, select= -c(DN.Cow,Reg1, Name,IMFlg,IMAvFlo,IMMxFlow,IMStall,IMStartSec,FDTYPE,FDNAME,CFC,BODY,Ill,Met,Gen,MFRobotTrain,CwRobDate,IMClusterSet,IMFlowMiss1,M100,LifeMilk,LifeFat,LifeProt,LifeMC,LifeFC,LifeDC,RatnYest,ConsYest,MsFedDat))
+df1 <- subset(df1, IMWt != 0)
+df1 <- subset(df1, IMWt != "NA")
+summary(df1)
+```
+# Now the dataset has been cleaned concerning the 0 values and the NA values. In order to predict if a cow gives less milk than expected, some calculations have to be done. One of these is that the expected milk production is calculated based on the time between 2 milkings of 1 individual cow. The area code "IMInterval" shows this, but the type class is unusable for calculations since it is a charachter. Therefore the type class has to be changed to a numeric one.
+```{r}
+df1$IMInterval <- as.integer(df1$IMInterval)
+head(df1)
+```
+
+# In column IMDat it is shown that the dates are displayed as 1 string. This is not handy for determining when a certain cow was milked. Therefore these strings are changed to a different output which are usable for a time-series model.
+```{r}
+df1$IMDat <- ymd(df1$IMDat)
+head(df1)
+```
+# Now the time of the colum IMTim has to be in the right order. In order to use the chron package for this function, the format of the IMTim column first have to consist of 4 characters (%H%M). Padding the time column (IMTim) in order to make it available for further use
+```{r}
+pad_imtim <- function(df) {
+  for (i in 3:6) {
+    df$IMTim <- stri_pad_left(df$IMTim, width=i, pad="0")
+  }
+  return(df)
+}
+pad_imtim(df1)
+```
+
+# The next step is the cut off the the displayed seconds (this is always 00 in the dataset) with the next code line. 
+```{r}
+df1$IMTim <-  gsub('.{2}$', '', df1$IMTim)
+df1$IMTim <- as.integer(df1$IMTim) # In order to be able to work further with these numbers, the character format first have to be change to integers again.
+```
+
+# All preparing work now leads to the fact that the strings can be transformed to a time format. 
+```{r}
+df1$IMTim <- substr(as.POSIXct(sprintf("%04.0f", df1$IMTim), format='%H%M'), 12, 16)
+head(df1)
+```
+# For usability reasons the date and time columns are merged and the leftover seperate date and time columns deleted.
+```{r}
+df1$IMdatetime <- as.POSIXct(paste(df1$IMDat, df1$IMTim),  # Add hours, minutes & seconds
+                            format = "%Y-%m-%d %H:%M")
+head(df1)
+```
+# Data modelling
+
+# Now the dataset will be ordered based in DateTime
+```{r}
+df1 <- (df1[order(df1$IMdatetime, decreasing = TRUE),]) # Reordering the dataset based in IMdatetime
+new_index_numbers <- seq_len(nrow(df1)) # Creating new index numbers for easier use later on
+row.names(df1) <- new_index_numbers # Changing the unordered index numbers to the new made index numbers so it is chronologically ordered
+head(df1)
+```
+# The next step is to retract (head) the last 50 milkings of the particular cow in put in a seperate dataframe.
+```{r}
+lastcow <- head(df1$RespISO, n=1)
+lastcowmilkings <- head(subset(df1, RespISO == lastcow), 500)
+head(lastcowmilkings)
+```
+
+```{r}
+# Set the timestamp column as the index of the dataframe
+rownames(lastcowmilkings) <-  lastcowmilkings$IMdatetime
+
+# Setting the Date column as Date
+lastcowmilkings$IMDat <- as.Date(lastcowmilkings$IMDat)
+
+selected_rows <- filter(lastcowmilkings, IMDat >= Sys.Date() - 104)
+head(selected_rows) ### WARNING: THERE ARE NO VALUES SHOWN SINCE THE DATA IS NOT REAL-TIME. THE CODE WORKS. DON'T CHANGE THIS CODECHUNK
+```
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+plot(cars)
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
